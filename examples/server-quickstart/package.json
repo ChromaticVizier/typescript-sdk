@@ -8,11 +8,14 @@
     },
     "scripts": {
         "build": "tsc",
-        "typecheck": "tsc --noEmit"
+        "typecheck": "tsc --noEmit",
+        "start": "node ./build/index.js",
+        "dev": "tsx src/index.ts",
+        "inspector": "npx @modelcontextprotocol/inspector tsx src/index.ts"
     },
     "dependencies": {
         "@modelcontextprotocol/server": "workspace:^",
-        "zod": "catalog:runtimeShared"
+        "zod": "^4.3.6"
     },
     "devDependencies": {
         "@types/node": "^24.10.1",

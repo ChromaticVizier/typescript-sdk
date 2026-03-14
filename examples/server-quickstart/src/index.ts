@@ -1,221 +1,87 @@
-//#region prelude
 import { McpServer, StdioServerTransport } from '@modelcontextprotocol/server';
-import * as z from 'zod/v4';
+import { z } from 'zod/v4';
 
-const NWS_API_BASE = 'https://api.weather.gov';
-const USER_AGENT = 'weather-app/1.0';
+const API_BASE_URL = process.env.API_BASE_URL || 'https://mcp-server.fuufhjn.link';
+// const API_BASE_URL = 'http://127.0.0.1:8787';
 
-// Create server instance
-const server = new McpServer({
-  name: 'weather',
-  version: '1.0.0',
+const server = new McpServer({ name: 'smart-home', version: '1.0.0' });
+
+// LED 控制工具
+const ledSchema = z.object({
+  color: z.string()
+    .regex(/^#?[0-9A-Fa-f]{6}$/)
+    .describe('RGB十六进制颜色值，例如: FF0000'),
+  brightness: z.number()
+    .min(0)
+    .max(255)
+    .int()
+    .describe('亮度值 (0-255)'),
 });
-//#endregion prelude
 
-//#region helpers
-// Helper function for making NWS API requests
-async function makeNWSRequest<T>(url: string): Promise<T | null> {
-  const headers = {
-    'User-Agent': USER_AGENT,
-    Accept: 'application/geo+json',
-  };
-
-  try {
-    const response = await fetch(url, { headers });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    return (await response.json()) as T;
-  } catch (error) {
-    console.error('Error making NWS request:', error);
-    return null;
-  }
-}
-
-interface AlertFeature {
-  properties: {
-    event?: string;
-    areaDesc?: string;
-    severity?: string;
-    status?: string;
-    headline?: string;
-  };
-}
-
-// Format alert data
-function formatAlert(feature: AlertFeature): string {
-  const props = feature.properties;
-  return [
-    `Event: ${props.event || 'Unknown'}`,
-    `Area: ${props.areaDesc || 'Unknown'}`,
-    `Severity: ${props.severity || 'Unknown'}`,
-    `Status: ${props.status || 'Unknown'}`,
-    `Headline: ${props.headline || 'No headline'}`,
-    '---',
-  ].join('\n');
-}
-
-interface ForecastPeriod {
-  name?: string;
-  temperature?: number;
-  temperatureUnit?: string;
-  windSpeed?: string;
-  windDirection?: string;
-  shortForecast?: string;
-}
-
-interface AlertsResponse {
-  features: AlertFeature[];
-}
-
-interface PointsResponse {
-  properties: {
-    forecast?: string;
-  };
-}
-
-interface ForecastResponse {
-  properties: {
-    periods: ForecastPeriod[];
-  };
-}
-//#endregion helpers
-
-//#region registerTools
-// Register weather tools
 server.registerTool(
-  'get-alerts',
+  'control_led',
   {
-    title: 'Get Weather Alerts',
-    description: 'Get weather alerts for a state',
-    inputSchema: z.object({
-      state: z.string().length(2)
-        .describe('Two-letter state code (e.g. CA, NY)'),
-    }),
+    title: '控制LED灯',
+    description: '设置WS2812 RGB LED灯的颜色和亮度',
+    inputSchema: ledSchema as any, // <-- 必须加 as any
   },
-  async ({ state }) => {
-    const stateCode = state.toUpperCase();
-    const alertsUrl = `${NWS_API_BASE}/alerts?area=${stateCode}`;
-    const alertsData = await makeNWSRequest<AlertsResponse>(alertsUrl);
-
-    if (!alertsData) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: 'Failed to retrieve alerts data',
-        }],
-      };
+  async ({ color, brightness }: { color: string; brightness: number }) => {
+    const normalizedColor = color.replace(/^#/, '').toUpperCase();
+    if (!/^[0-9A-Fa-f]{6}$/.test(normalizedColor)) {
+      return { content: [{ type: 'text' as const, text: '❌ 颜色格式错误' }] };
     }
 
-    const features = alertsData.features || [];
-
-    if (features.length === 0) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `No active alerts for ${stateCode}`,
-        }],
-      };
+    if (brightness < 0 || brightness > 255) {
+      return { content: [{ type: 'text' as const, text: '❌ 亮度值必须在0-255之间' }] };
     }
 
-    const formattedAlerts = features.map(formatAlert);
+    const response = await fetch(`${API_BASE_URL}/api/led/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ color: normalizedColor, brightness }),
+    });
 
-    return {
-      content: [{
-        type: 'text' as const,
-        text: `Active alerts for ${stateCode}:\n\n${formattedAlerts.join('\n')}`,
-      }],
-    };
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    return { content: [{ type: 'text' as const, text: `✅ LED灯已设置为颜色 #${normalizedColor}，亮度 ${brightness}` }] };
   },
 );
 
+// 屏幕消息工具
+const screenSchema = z.object({
+  content: z.string().describe('要显示在屏幕上的文本内容'),
+});
+
 server.registerTool(
-  'get-forecast',
+  'send_screen_message',
   {
-    title: 'Get Weather Forecast',
-    description: 'Get weather forecast for a location',
-    inputSchema: z.object({
-      latitude: z.number().min(-90).max(90)
-        .describe('Latitude of the location'),
-      longitude: z.number().min(-180).max(180)
-        .describe('Longitude of the location'),
-    }),
+    title: '发送消息到屏幕',
+    description: '向OLED屏幕设备发送文本消息',
+    inputSchema: screenSchema as any, // <-- 加 as any
   },
-  async ({ latitude, longitude }) => {
-    // Get grid point data
-    const pointsUrl = `${NWS_API_BASE}/points/${latitude.toFixed(4)},${longitude.toFixed(4)}`;
-    const pointsData = await makeNWSRequest<PointsResponse>(pointsUrl);
+  async ({ content }: { content: string }) => {
+    if (!content) return { content: [{ type: 'text' as const, text: '❌ 消息内容不能为空' }] };
 
-    if (!pointsData) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: `Failed to retrieve grid point data for coordinates: ${latitude}, ${longitude}. This location may not be supported by the NWS API (only US locations are supported).`,
-        }],
-      };
-    }
+    const response = await fetch(`${API_BASE_URL}/api/screen/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
 
-    const forecastUrl = pointsData.properties?.forecast;
-    if (!forecastUrl) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: 'Failed to get forecast URL from grid point data',
-        }],
-      };
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    // Get forecast data
-    const forecastData = await makeNWSRequest<ForecastResponse>(forecastUrl);
-    if (!forecastData) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: 'Failed to retrieve forecast data',
-        }],
-      };
-    }
-
-    const periods = forecastData.properties?.periods || [];
-    if (periods.length === 0) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: 'No forecast periods available',
-        }],
-      };
-    }
-
-    // Format forecast periods
-    const formattedForecast = periods.map((period: ForecastPeriod) =>
-      [
-        `${period.name || 'Unknown'}:`,
-        `Temperature: ${period.temperature || 'Unknown'}°${period.temperatureUnit || 'F'}`,
-        `Wind: ${period.windSpeed || 'Unknown'} ${period.windDirection || ''}`,
-        `${period.shortForecast || 'No forecast available'}`,
-        '---',
-      ].join('\n'),
-    );
-
-    return {
-      content: [{
-        type: 'text' as const,
-        text: `Forecast for ${latitude}, ${longitude}:\n\n${formattedForecast.join('\n')}`,
-      }],
-    };
+    return { content: [{ type: 'text' as const, text: `✅ 消息已成功发送到屏幕: "${content}"` }] };
   },
 );
-//#endregion registerTools
 
-//#region main
+// 启动 MCP server
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('Weather MCP Server running on stdio');
+  console.error('Smart Home MCP Server running on stdio');
 }
 
-main().catch((error) => {
-  console.error('Fatal error in main():', error);
+main().catch((err) => {
+  console.error('Fatal error in main():', err);
   process.exit(1);
 });
-//#endregion main
